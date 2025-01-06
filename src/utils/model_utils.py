@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 import random
 from typing import *
@@ -18,7 +18,6 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda'):
     model: huggingface model
     tokenizer: huggingface tokenizer
     MODEL_CONFIG: config variables w/ standardized names
-    
     """
     assert model_name is not None
 
@@ -62,109 +61,53 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda'):
                       "attn_hook_names":[f'gpt_neox.layers.{layer}.attention.dense' for layer in range(model.config.num_hidden_layers)],
                       "layer_hook_names":[f'gpt_neox.layers.{layer}' for layer in range(model.config.num_hidden_layers)], 
                       "prepend_bos":False}
-        
-    elif 'gemma' in model_name.lower():
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
-
-        MODEL_CONFIG={"n_heads":model.config.num_attention_heads,
-                      "n_layers":model.config.num_hidden_layers,
-                      "resid_dim":model.config.hidden_size,
-                      "name_or_path":model.config._name_or_path,
-                      "attn_hook_names":[f'model.layers.{layer}.self_attn.o_proj' for layer in range(model.config.num_hidden_layers)],
-                      "layer_hook_names":[f'model.layers.{layer}' for layer in range(model.config.num_hidden_layers)],
-                      "prepend_bos":True}
-        
-    elif 'llama-3.2' in model_name.lower() or 'llama-3' in model_name.lower():
-        from transformers import BitsAndBytesConfig
-
-        tokenizer = AutoTokenizer.from_pretrained(model_name, 
-                                                use_fast=True,
-                                                trust_remote_code=True)
+    
+    # Add support for unsloth/Llama-3.2-3B-Instruct
+    elif 'unsloth/llama-3.2' in model_name.lower():
+        print("Loading unsloth Llama 3.2...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            "unsloth/Llama-3.2-3B-Instruct", 
+            trust_remote_code=True
+        )
         tokenizer.pad_token = tokenizer.eos_token
 
-        # Configure model loading based on size
-        if '70b' in model_name.lower():
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type='nf4',
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=torch.float16
-            )
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                device_map="auto",
-                quantization_config=bnb_config,
-                trust_remote_code=True
-            )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                device_map="auto",
-                torch_dtype=torch.float16,
-                trust_remote_code=True
-            )
+        # Load model in 16-bit precision for efficiency
+        model = AutoModelForCausalLM.from_pretrained(
+            "unsloth/Llama-3.2-3B-Instruct",
+            device_map="auto",  # Automatically handle device placement
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
+        )
 
         MODEL_CONFIG = {
             "n_heads": model.config.num_attention_heads,
             "n_layers": model.config.num_hidden_layers,
             "resid_dim": model.config.hidden_size,
             "name_or_path": model.config._name_or_path,
+            # Define hook points for the unsloth Llama model
             "attn_hook_names": [f'model.layers.{layer}.self_attn.o_proj' for layer in range(model.config.num_hidden_layers)],
             "layer_hook_names": [f'model.layers.{layer}' for layer in range(model.config.num_hidden_layers)],
             "prepend_bos": True
         }
-        
-    elif 'llama' in model_name.lower():
-        if '70b' in model_name.lower():
-            # use quantization. requires `bitsandbytes` library
-            from transformers import BitsAndBytesConfig
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type='nf4',
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=torch.float16
-            )
-            tokenizer = LlamaTokenizer.from_pretrained(model_name)
-            model = LlamaForCausalLM.from_pretrained(
-                    model_name,
-                    trust_remote_code=True,
-                    quantization_config=bnb_config
-            )
-        else:
-            if '7b' in model_name.lower() or '8b' in model_name.lower():
-                model_dtype = torch.float32
-            else: #half precision for bigger llama models
-                model_dtype = torch.float16
-            
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=model_dtype).to(device)
 
-        MODEL_CONFIG={"n_heads":model.config.num_attention_heads,
-                      "n_layers":model.config.num_hidden_layers,
-                      "resid_dim":model.config.hidden_size,
-                      "name_or_path":model.config._name_or_path,
-                      "attn_hook_names":[f'model.layers.{layer}.self_attn.o_proj' for layer in range(model.config.num_hidden_layers)],
-                      "layer_hook_names":[f'model.layers.{layer}' for layer in range(model.config.num_hidden_layers)],
-                      "prepend_bos":True}
+        print(f"Model config: {MODEL_CONFIG['n_layers']} layers, {MODEL_CONFIG['n_heads']} heads")
+
     else:
-        raise NotImplementedError("Still working to get this model available!")
+        raise NotImplementedError("Model is not yet supported!")
 
-    
     return model, tokenizer, MODEL_CONFIG
 
 
 def set_seed(seed: int) -> None:
     """
-    Sets the seed to make everything deterministic, for reproducibility of experiments
+    Sets the seed to make everything deterministic, for reproducibility of experiments.
 
     Parameters:
     seed: the number to set the seed to
 
     Return: None
     """
-
     # Random seed
     random.seed(seed)
 
