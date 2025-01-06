@@ -8,6 +8,90 @@ from .prompt_utils import *
 from .model_utils import *
 from .intervention_utils import *
 
+def evaluate_heads_single_task(model, model_config, tokenizer, dataset, mean_activations, mean_activations_shuffled, n_trials=25):
+    """
+    Evaluate causal effects of each attention head by measuring change in output distribution
+    when replacing head activations in shuffled prompts with clean mean activations.
+    
+    Parameters:
+    model: The language model to analyze
+    model_config: Model configuration dict
+    tokenizer: Model tokenizer
+    dataset: Dataset containing examples for the task
+    mean_activations: Mean attention head activations on clean prompts
+    mean_activations_shuffled: Mean attention head activations on shuffled prompts
+    n_trials: Number of evaluation trials
+    
+    Returns:
+    tensor of indirect effects for each head
+    """
+    import torch
+    from tqdm import tqdm
+    from .prompt_utils import word_pairs_to_prompt_data, create_prompt
+    from .intervention_utils import compute_duplicated_labels, intervention_with_activations
+    import numpy as np
+    
+    all_effects = []
+    
+    # If the model already prepends a bos token by default, we don't want to add one
+    prepend_bos = False if model_config['prepend_bos'] else True
+    
+    for _ in tqdm(range(n_trials)):
+        # Create prompt with random examples
+        word_pairs = dataset['train'][np.random.choice(len(dataset['train']), 10, replace=False)]
+        word_pairs_test = dataset['valid'][np.random.choice(len(dataset['valid']))]
+        
+        # Create both clean and shuffled prompts
+        clean_prompt = word_pairs_to_prompt_data(word_pairs, 
+                                               query_target_pair=word_pairs_test,
+                                               prepend_bos_token=prepend_bos,
+                                               shuffle_labels=False)
+        
+        shuffled_prompt = word_pairs_to_prompt_data(word_pairs,
+                                                   query_target_pair=word_pairs_test, 
+                                                   prepend_bos_token=prepend_bos,
+                                                   shuffle_labels=True)
+        
+        # Get target token id
+        target = clean_prompt['query_target']['output']
+        target = target[0] if isinstance(target, list) else target
+        sentence = create_prompt(clean_prompt)
+        target_id = get_answer_id(sentence, target, tokenizer)
+        
+        # Get base logits from shuffled prompt
+        inputs = tokenizer([create_prompt(shuffled_prompt)], return_tensors='pt').to(model.device)
+        base_logits = model(**inputs).logits[:,-1,:]
+        base_prob = torch.softmax(base_logits, dim=-1)[0, target_id].item()
+        
+        # Evaluate effect of each head
+        effects = []
+        for layer in range(model_config['n_layers']):
+            for head in range(model_config['n_heads']):
+                # Replace shuffled activation with clean activation for this head
+                inputs = tokenizer([create_prompt(shuffled_prompt)], return_tensors='pt').to(model.device)
+                
+                # Do the intervention
+                new_logits = intervention_with_activations(
+                    inputs,
+                    model,
+                    model_config,
+                    [(layer, head)],
+                    mean_activations[layer,head].unsqueeze(0).unsqueeze(0)
+                )
+                
+                # Get probability of target token
+                new_prob = torch.softmax(new_logits, dim=-1)[0, target_id].item()
+                
+                # Calculate effect
+                effect = new_prob - base_prob
+                effects.append(effect)
+                
+        all_effects.append(effects)
+        
+    # Average effects across trials
+    mean_effects = torch.tensor(all_effects).mean(dim=0)
+    return mean_effects.reshape(model_config['n_layers'], model_config['n_heads'])
+
 
 def compute_top_k_accuracy(target_token_ranks, k=10) -> float:
     """
