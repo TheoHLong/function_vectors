@@ -76,6 +76,46 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda'):
                       "layer_hook_names":[f'model.layers.{layer}' for layer in range(model.config.num_hidden_layers)],
                       "prepend_bos":True}
         
+    elif 'llama-3.2' in model_name.lower() or 'llama-3' in model_name.lower():
+        from transformers import BitsAndBytesConfig
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name, 
+                                                use_fast=True,
+                                                trust_remote_code=True)
+        tokenizer.pad_token = tokenizer.eos_token
+
+        # Configure model loading based on size
+        if '70b' in model_name.lower():
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type='nf4',
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.float16
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map="auto",
+                quantization_config=bnb_config,
+                trust_remote_code=True
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map="auto",
+                torch_dtype=torch.float16,
+                trust_remote_code=True
+            )
+
+        MODEL_CONFIG = {
+            "n_heads": model.config.num_attention_heads,
+            "n_layers": model.config.num_hidden_layers,
+            "resid_dim": model.config.hidden_size,
+            "name_or_path": model.config._name_or_path,
+            "attn_hook_names": [f'model.layers.{layer}.self_attn.o_proj' for layer in range(model.config.num_hidden_layers)],
+            "layer_hook_names": [f'model.layers.{layer}' for layer in range(model.config.num_hidden_layers)],
+            "prepend_bos": True
+        }
+        
     elif 'llama' in model_name.lower():
         if '70b' in model_name.lower():
             # use quantization. requires `bitsandbytes` library
@@ -98,11 +138,6 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda'):
             else: #half precision for bigger llama models
                 model_dtype = torch.float16
             
-            # If transformers version is < 4.31 use LlamaLoaders
-            # tokenizer = LlamaTokenizer.from_pretrained(model_name)
-            # model = LlamaForCausalLM.from_pretrained(model_name, torch_dtype=model_dtype).to(device)
-
-            # If transformers version is >= 4.31, use AutoLoaders
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=model_dtype).to(device)
 
@@ -118,6 +153,7 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda'):
 
     
     return model, tokenizer, MODEL_CONFIG
+
 
 def set_seed(seed: int) -> None:
     """
